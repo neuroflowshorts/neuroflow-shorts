@@ -32,6 +32,10 @@ body = {
         "selfDeclaredMadeForKids": False,
     },
 }
+# AI label: on by default (honest: the narration is AI-generated). Set repo variable AI_LABEL=false to turn it off.
+if os.environ.get("AI_LABEL", "true").strip().lower() != "false":
+    body["status"]["containsSyntheticMedia"] = True
+
 req = youtube.videos().insert(
     part="snippet,status",
     body=body,
