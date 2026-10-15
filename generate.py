@@ -21,7 +21,7 @@ WORK = OUT / "work"
 WORK.mkdir(parents=True, exist_ok=True)
 
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY", "")
 PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 VOICE = os.environ.get("TTS_VOICE", "en-US-AriaNeural")  # try en-IN-NeerjaNeural for an Indian accent
@@ -58,7 +58,7 @@ def pick_topic():
 
 def ask_gemini(topic):
     models = []
-    for m in (MODEL, "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash-lite"):
+    for m in (MODEL, "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash"):
         if m not in models:
             models.append(m)
     body = {
@@ -69,7 +69,7 @@ def ask_gemini(topic):
     last = None
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(2):
+        for attempt in range(5):
             try:
                 r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=120)
                 if r.status_code != 200:
@@ -77,7 +77,7 @@ def ask_gemini(topic):
                     last = f"HTTP {r.status_code}"
                     if r.status_code in (400, 401, 403, 404):
                         break  # try next model
-                    time.sleep(10)
+                    time.sleep(15 * (attempt + 1))  # busy server: wait longer each time
                     continue
                 text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 data = json.loads(text)
