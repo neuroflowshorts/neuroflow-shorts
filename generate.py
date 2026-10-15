@@ -30,7 +30,7 @@ SYSTEM = """You write scripts for YouTube Shorts for the channel NeuroFlow: gent
 
 Voice: warm, calm, validating, like a kind friend who truly gets it. Never shaming. No hustle culture, no 'just try harder', no 5 AM routines.
 
-Safety rules: never diagnose, never claim to treat or cure anything, never state medical claims as certain. Use hedged language such as 'many people with ADHD find' or 'research suggests'. Do not invent studies, statistics, or expert names. Stick to widely accepted ideas (body doubling, task initiation, time blindness, energy management, sensory breaks, self-compassion).
+Safety rules: never diagnose, never claim to treat or cure anything, never state medical claims as certain. Use hedged language such as 'many people with ADHD find', 'can feel like' or 'research suggests'. Never describe how the brain or nervous system works as certain fact. Do not invent studies, statistics, or expert names. Stick to widely accepted ideas (body doubling, task initiation, time blindness, energy management, sensory breaks, self-compassion).
 
 Structure (75 to 105 words total, about 35 to 45 seconds spoken):
 1. Hook: first sentence, 12 words or fewer, names a relatable struggle.
@@ -43,11 +43,14 @@ Style: plain spoken sentences. No emojis, no hashtags, no headings, no stage dir
 Return ONLY JSON with these keys:
 title: string, 70 characters or fewer, relatable, honest, not clickbait
 script: string, the narration exactly as spoken
-visual_keywords: array of 5 short English stock-video search phrases for calm visuals (for example 'person writing in notebook', 'soft morning light window', 'cozy desk plant'); avoid anything with readable text
+visual_keywords: array of 8 stock-video search phrases, each 2 or 3 simple words, for calm visuals (for example 'writing notebook', 'window sunlight', 'coffee desk', 'laptop typing', 'person walking', 'plant leaves'); avoid anything with readable text
+hook: string, 3 to 6 words, bold opening text shown on screen that names the struggle (for example 'Inbox dread? Try this.')
 description: string, two short sentences
 tags: array of 8 to 10 strings"""
 
-DISCLAIMER = "This video is for general education and support, not medical advice. Please talk to a qualified professional about diagnosis or treatment."
+GENERIC = ["calm nature", "soft light", "coffee cup", "plant leaves", "person walking", "clouds sky"]
+
+DISCLAIMER = "Narration is AI-generated and visuals are licensed stock footage. This video is for general education and support, not medical advice. Please talk to a qualified professional about diagnosis or treatment."
 
 
 def pick_topic():
@@ -69,9 +72,9 @@ def ask_gemini(topic):
     last = None
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(5):
+        for attempt in range(3):
             try:
-                r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=120)
+                r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=60)
                 if r.status_code != 200:
                     print(f"GEMINI ERROR [{model}] HTTP {r.status_code}: {r.text[:400]}")
                     last = f"HTTP {r.status_code}"
@@ -132,16 +135,25 @@ def ts(t):
     return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
-def make_ass(words, path, per=3):
+def make_ass(words, path, per=3, hook=None):
     header = (
         "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n"
         "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,"
         "Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,"
         "MarginL,MarginR,MarginV,Encoding\n"
-        "Style: Main,DejaVu Sans,76,&H00FFFFFF,&H000000FF,&H00302010,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,5,90,90,0,1\n\n"
+        "Style: Main,DejaVu Sans,76,&H00FFFFFF,&H000000FF,&H00302010,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,5,90,90,0,1\n"
+        "Style: Hook,DejaVu Sans,96,&H0000E5FF,&H000000FF,&H00201008,&H80000000,-1,0,0,0,100,100,0,0,1,9,3,8,70,70,330,1\n\n"
         "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
     lines = []
+    if hook:
+        hw = re.sub(r"[{}\\]", "", hook).upper().split()
+        if len(hw) > 3:
+            mid = (len(hw) + 1) // 2
+            htxt = " ".join(hw[:mid]) + "\\N" + " ".join(hw[mid:])
+        else:
+            htxt = " ".join(hw)
+        lines.append(f"Dialogue: 1,{ts(0.05)},{ts(2.6)},Hook,,0,0,0,,{htxt}")
     chunks = [words[i:i + per] for i in range(0, len(words), per)]
     for i, ch in enumerate(chunks):
         start = ch[0][1]
@@ -253,9 +265,9 @@ def build(clips, total):
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", "bg.mp4", "-i", "voice.mp3"]
     if music:
         cmd += ["-stream_loop", "-1", "-i", str(random.choice(music).resolve())]
-        af = "[1:a]anull[a1];[2:a]volume=0.08[a2];[a1][a2]amix=inputs=2:duration=first:normalize=0[a]"
+        af = "[1:a]anull[a1];[2:a]volume=0.08[a2];[a1][a2]amix=inputs=2:duration=first:normalize=0[mix];[mix]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
     else:
-        af = "[1:a]anull[a]"
+        af = "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
     cmd += ["-filter_complex", "[0:v]ass=captions.ass[v];" + af, "-map", "[v]", "-map", "[a]",
             "-t", f"{total:.2f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
@@ -272,8 +284,8 @@ def main():
     dur = probe(WORK / "voice.mp3")
     if not words:
         words = fake_words(script, dur)
-    make_ass(words, WORK / "captions.ass")
-    clips = fetch_clips(data.get("visual_keywords", []))
+    make_ass(words, WORK / "captions.ass", hook=data.get("hook"))
+    clips = fetch_clips(list(data.get("visual_keywords", [])) + GENERIC, want=9)
     total = min(dur + 0.6, 59.0)
     build(clips, total)
 
