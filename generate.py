@@ -57,28 +57,40 @@ def pick_topic():
 
 
 def ask_gemini(topic):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    models = []
+    for m in (MODEL, "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash-lite"):
+        if m not in models:
+            models.append(m)
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM}]},
         "contents": [{"parts": [{"text": f"Topic: {topic}\nWrite a fresh, specific take. Avoid generic advice."}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
     }
     last = None
-    for attempt in range(4):
-        try:
-            r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=120)
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            data = json.loads(text)
-            n = len(data["script"].split())
-            if not 55 <= n <= 125:
-                raise ValueError(f"script has {n} words, retrying")
-            return data
-        except Exception as e:  # retry on any failure
-            last = e
-            print("Gemini attempt failed:", e)
-            time.sleep(5 * (attempt + 1))
-    raise RuntimeError(f"Gemini failed: {last}")
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(2):
+            try:
+                r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=120)
+                if r.status_code != 200:
+                    print(f"GEMINI ERROR [{model}] HTTP {r.status_code}: {r.text[:400]}")
+                    last = f"HTTP {r.status_code}"
+                    if r.status_code in (400, 401, 403, 404):
+                        break  # try next model
+                    time.sleep(10)
+                    continue
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                data = json.loads(text)
+                n = len(data["script"].split())
+                if not 55 <= n <= 125:
+                    raise ValueError(f"script has {n} words, retrying")
+                print("Gemini OK with model:", model)
+                return data
+            except Exception as e:
+                last = e
+                print(f"Gemini problem [{model}]:", e)
+                time.sleep(3)
+    raise RuntimeError(f"Gemini failed on all models. Last error: {last}")
 
 
 def clean(text):
