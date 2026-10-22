@@ -21,7 +21,13 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-dejavu-core
           pip install -r requirements.txt
       - name: Make the video
-        run: python generate.py
+        run: |
+          for i in 1 2 3; do
+            if python generate.py; then exit 0; fi
+            echo "Attempt $i failed. Waiting 90 seconds, then trying again."
+            sleep 90
+          done
+          exit 1
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
