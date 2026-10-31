@@ -32,21 +32,35 @@ Voice: warm, calm, validating, like a kind friend who truly gets it. Never shami
 
 Safety rules: never diagnose, never claim to treat or cure anything, never state medical claims as certain. Use hedged language such as 'many people with ADHD find', 'can feel like' or 'research suggests'. Never describe how the brain or nervous system works as certain fact. Do not invent studies, statistics, or expert names. Stick to widely accepted ideas (body doubling, task initiation, time blindness, energy management, sensory breaks, self-compassion).
 
-Structure (75 to 105 words total, about 35 to 45 seconds spoken):
-1. Hook: first sentence, 12 words or fewer, names a relatable struggle.
-2. One sentence of validation explaining why it is hard (it is the brain, not laziness).
-3. ONE concrete tiny tip, plus a low-energy version of it.
-4. A soft closing line inviting the viewer to follow for more gentle tools. No pressure.
+Length: the narration is 50 to 70 words, about 20 to 28 seconds spoken. Short sentences. Every word must earn its place. Include ONE concrete tiny tip, with a low-energy version of it.
 
-Style: plain spoken sentences. No emojis, no hashtags, no headings, no stage directions, no lists.
+Hook: the first sentence is 10 words or fewer and names a relatable struggle or a surprising, kind claim. Never start with a greeting, with 'today', or with 'in this video'.
+
+Ending: the second-to-last sentence echoes the opening line so the video loops naturally. The last sentence is a short, easy-to-answer question that invites a comment about the viewer's own experience.
+
+Follow the FORMAT given in the request exactly.
+
+Style: plain spoken sentences. No emojis, no hashtags, no headings, no stage directions, no lists, no 'follow for more'.
 
 Return ONLY JSON with these keys:
-title: string, 70 characters or fewer, relatable, honest, not clickbait
+title: string, 45 characters or fewer, the main search phrase first (for example 'ADHD task paralysis: how to start'), honest, not clickbait
 script: string, the narration exactly as spoken
 visual_keywords: array of 8 stock-video search phrases, each 2 or 3 simple words, for calm visuals (for example 'writing notebook', 'window sunlight', 'coffee desk', 'laptop typing', 'person walking', 'plant leaves'); avoid anything with readable text
 hook: string, 3 to 6 words, bold opening text shown on screen that names the struggle (for example 'Inbox dread? Try this.')
-description: string, two short sentences
+description: string, two short sentences; the first sentence repeats the main search phrase
+pinned_comment: string, one friendly question for the pinned comment
 tags: array of 8 to 10 strings"""
+
+FORMATS = [
+    "MYTH BUSTER: open by gently overturning a common belief ('Your to-do list isn't failing you.'), explain in one sentence why the belief hurts neurodivergent people, then give the tiny tip.",
+    "POV MOMENT: open with 'POV:' followed by a very relatable moment, validate it in one sentence, then give the tiny tip as what to try next.",
+    "STOP DOING X, DO Y: open with 'Stop ...' naming one habit that backfires for ADHD brains, say why in one sentence, then give the kinder replacement as the tiny tip.",
+    "THREE TINY STEPS: open with the struggle, then give exactly three very small numbered-in-speech steps ('First... Second... Third...'), each under 10 words, the third being the low-energy version.",
+    "QUESTION AND ANSWER: open with the question the viewer secretly asks themselves ('Why can't I start even when I want to?'), answer it kindly in two sentences, then give the tiny tip.",
+]
+
+SERIES_START = os.environ.get("SERIES_START_DATE", "2026-10-24")
+
 
 GENERIC = ["calm nature", "soft light", "coffee cup", "plant leaves", "person walking", "clouds sky"]
 
@@ -57,6 +71,22 @@ def pick_topic():
     with open(ROOT / "topics.csv", encoding="utf-8") as f:
         topics = [r[0].strip() for r in csv.reader(f) if r and r[0].strip()]
     return topics[datetime.date.today().toordinal() % len(topics)]
+
+
+def pick_format(n_topics=60):
+    o = datetime.date.today().toordinal()
+    return FORMATS[(o + o // max(n_topics, 1)) % len(FORMATS)]
+
+
+def episode_number():
+    start = datetime.date.fromisoformat(SERIES_START)
+    return max(1, (datetime.date.today() - start).days + 1)
+
+
+def make_title(raw, n):
+    base = clean(raw).rstrip(".")
+    suffix = f" | Tip #{n}"
+    return (base[: 100 - len(suffix)].rstrip() + suffix)
 
 
 def list_models():
@@ -79,7 +109,7 @@ def list_models():
         return []
 
 
-def ask_gemini(topic):
+def ask_gemini(topic, fmt):
     found = sorted(list_models(), reverse=True)
     found.sort(key=lambda n: "lite" in n)  # full models first, lite last
     models = []
@@ -90,7 +120,7 @@ def ask_gemini(topic):
     print("Will try models in this order:", models)
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "contents": [{"parts": [{"text": f"Topic: {topic}\nWrite a fresh, specific take. Avoid generic advice."}]}],
+        "contents": [{"parts": [{"text": f"Topic: {topic}\nFORMAT: {fmt}\nWrite a fresh, specific take. Avoid generic advice."}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
     }
     last = None
@@ -109,7 +139,7 @@ def ask_gemini(topic):
                 text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 data = json.loads(text)
                 n = len(data["script"].split())
-                if not 55 <= n <= 125:
+                if not 45 <= n <= 90:
                     raise ValueError(f"script has {n} words, retrying")
                 print("Gemini OK with model:", model)
                 return data
@@ -302,7 +332,9 @@ def build(clips, total):
 def main():
     topic = os.environ.get("TOPIC") or pick_topic()
     print("Topic:", topic)
-    data = ask_gemini(topic)
+    fmt = pick_format()
+    print("Format:", fmt.split(':')[0])
+    data = ask_gemini(topic, fmt)
     script = clean(data["script"])
     words = asyncio.run(tts(script, WORK / "voice.mp3"))
     dur = probe(WORK / "voice.mp3")
@@ -315,12 +347,13 @@ def main():
 
     tags = [str(t)[:30] for t in data.get("tags", [])][:10]
     hashtags = "#Shorts #ADHD #Neurodivergent #GentleProductivity"
-    title = clean(data["title"])[:92]
+    title = make_title(data["title"], episode_number())
     meta = {
         "title": title,
         "description": f"{clean(data.get('description', ''))}\n\nNew gentle tools every day. Follow NeuroFlow.\n\n{hashtags}\n\n{DISCLAIMER}",
         "tags": tags + ["Shorts", "ADHD", "neurodivergent", "executive dysfunction"],
         "topic": topic,
+        "pinned_comment": clean(data.get("pinned_comment", "")),
         "script": script,
     }
     (OUT / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
