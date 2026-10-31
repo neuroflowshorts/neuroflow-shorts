@@ -1,364 +1,58 @@
-"""NeuroFlow Shorts bot.
-Picks a topic -> Gemini writes a script -> edge-tts voice -> Pexels clips -> ffmpeg builds
-a 1080x1920 video with captions. Output: output/short.mp4 and output/meta.json
-"""
-import asyncio
-import csv
-import datetime
+"""Uploads output/short.mp4 to YouTube using a stored refresh token."""
 import json
 import os
 import pathlib
-import random
-import re
-import subprocess
-import time
 
-import requests
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-ROOT = pathlib.Path(__file__).parent
-OUT = ROOT / "output"
-WORK = OUT / "work"
-WORK.mkdir(parents=True, exist_ok=True)
+OUT = pathlib.Path(__file__).parent / "output"
+meta = json.loads((OUT / "meta.json").read_text(encoding="utf-8"))
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-PEXELS_KEY = os.environ.get("PEXELS_API_KEY", "")
-PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
-VOICE = os.environ.get("TTS_VOICE", "en-US-AriaNeural")  # try en-IN-NeerjaNeural for an Indian accent
-
-SYSTEM = """You write scripts for YouTube Shorts for the channel NeuroFlow: gentle, science-informed productivity for neurodivergent people (ADHD, autism, anxiety) and anyone who struggles with executive dysfunction.
-
-Voice: warm, calm, validating, like a kind friend who truly gets it. Never shaming. No hustle culture, no 'just try harder', no 5 AM routines.
-
-Safety rules: never diagnose, never claim to treat or cure anything, never state medical claims as certain. Use hedged language such as 'many people with ADHD find', 'can feel like' or 'research suggests'. Never describe how the brain or nervous system works as certain fact. Do not invent studies, statistics, or expert names. Stick to widely accepted ideas (body doubling, task initiation, time blindness, energy management, sensory breaks, self-compassion).
-
-Length: the narration is 50 to 70 words, about 20 to 28 seconds spoken. Short sentences. Every word must earn its place. Include ONE concrete tiny tip, with a low-energy version of it.
-
-Hook: the first sentence is 10 words or fewer and names a relatable struggle or a surprising, kind claim. Never start with a greeting, with 'today', or with 'in this video'.
-
-Ending: the second-to-last sentence echoes the opening line so the video loops naturally. The last sentence is a short, easy-to-answer question that invites a comment about the viewer's own experience.
-
-Follow the FORMAT given in the request exactly.
-
-Style: plain spoken sentences. No emojis, no hashtags, no headings, no stage directions, no lists, no 'follow for more'.
-
-Return ONLY JSON with these keys:
-title: string, 45 characters or fewer, the main search phrase first (for example 'ADHD task paralysis: how to start'), honest, not clickbait
-script: string, the narration exactly as spoken
-visual_keywords: array of 8 stock-video search phrases, each 2 or 3 simple words, for calm visuals (for example 'writing notebook', 'window sunlight', 'coffee desk', 'laptop typing', 'person walking', 'plant leaves'); avoid anything with readable text
-hook: string, 3 to 6 words, bold opening text shown on screen that names the struggle (for example 'Inbox dread? Try this.')
-description: string, two short sentences; the first sentence repeats the main search phrase
-pinned_comment: string, one friendly question for the pinned comment
-tags: array of 8 to 10 strings"""
-
-FORMATS = [
-    "MYTH BUSTER: open by gently overturning a common belief ('Your to-do list isn't failing you.'), explain in one sentence why the belief hurts neurodivergent people, then give the tiny tip.",
-    "POV MOMENT: open with 'POV:' followed by a very relatable moment, validate it in one sentence, then give the tiny tip as what to try next.",
-    "STOP DOING X, DO Y: open with 'Stop ...' naming one habit that backfires for ADHD brains, say why in one sentence, then give the kinder replacement as the tiny tip.",
-    "THREE TINY STEPS: open with the struggle, then give exactly three very small numbered-in-speech steps ('First... Second... Third...'), each under 10 words, the third being the low-energy version.",
-    "QUESTION AND ANSWER: open with the question the viewer secretly asks themselves ('Why can't I start even when I want to?'), answer it kindly in two sentences, then give the tiny tip.",
-]
-
-SERIES_START = os.environ.get("SERIES_START_DATE", "2026-10-24")
+def env(name):
+    return os.environ.get(name, "").strip().strip('"').strip("'")
 
 
-GENERIC = ["calm nature", "soft light", "coffee cup", "plant leaves", "person walking", "clouds sky"]
+CID, CSEC, RTOK = env("YT_CLIENT_ID"), env("YT_CLIENT_SECRET"), env("YT_REFRESH_TOKEN")
+# Safe checks (no secret values are printed):
+print("Check client_id: starts with", CID[:8], "| ends with .apps.googleusercontent.com:",
+      CID.endswith(".apps.googleusercontent.com"), "| length", len(CID))
+print("Check client_secret: starts with GOCSPX-:", CSEC.startswith("GOCSPX-"), "| length", len(CSEC))
+print("Check refresh token: starts with 1//:", RTOK.startswith("1//"), "| length", len(RTOK))
 
-DISCLAIMER = "Narration is AI-generated and visuals are licensed stock footage. This video is for general education and support, not medical advice. Please talk to a qualified professional about diagnosis or treatment."
+creds = Credentials(
+    None,
+    refresh_token=RTOK,
+    token_uri="https://oauth2.googleapis.com/token",
+    client_id=CID,
+    client_secret=CSEC,
+    scopes=["https://www.googleapis.com/auth/youtube.upload"],
+)
+youtube = build("youtube", "v3", credentials=creds)
 
+body = {
+    "snippet": {
+        "title": meta["title"],
+        "description": meta["description"],
+        "tags": meta["tags"],
+        "categoryId": "27",  # Education
+    },
+    "status": {
+        "privacyStatus": os.environ.get("PRIVACY", "private") or "private",
+        "selfDeclaredMadeForKids": False,
+    },
+}
+# AI label: on by default (honest: the narration is AI-generated). Set repo variable AI_LABEL=false to turn it off.
+if os.environ.get("AI_LABEL", "true").strip().lower() != "false":
+    body["status"]["containsSyntheticMedia"] = True
 
-def pick_topic():
-    with open(ROOT / "topics.csv", encoding="utf-8") as f:
-        topics = [r[0].strip() for r in csv.reader(f) if r and r[0].strip()]
-    return topics[datetime.date.today().toordinal() % len(topics)]
-
-
-def pick_format(n_topics=60):
-    o = datetime.date.today().toordinal()
-    return FORMATS[(o + o // max(n_topics, 1)) % len(FORMATS)]
-
-
-def episode_number():
-    start = datetime.date.fromisoformat(SERIES_START)
-    return max(1, (datetime.date.today() - start).days + 1)
-
-
-def make_title(raw, n):
-    base = clean(raw).rstrip(".")
-    suffix = f" | Tip #{n}"
-    return (base[: 100 - len(suffix)].rstrip() + suffix)
-
-
-def list_models():
-    """Ask Google which Gemini 'flash' models this key can use right now."""
-    try:
-        r = requests.get(
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            headers={"x-goog-api-key": GEMINI_KEY}, params={"pageSize": 200}, timeout=30,
-        )
-        names = []
-        for m in r.json().get("models", []):
-            n = m.get("name", "").replace("models/", "")
-            if ("generateContent" in m.get("supportedGenerationMethods", []) and "flash" in n
-                    and not any(x in n for x in ("image", "tts", "audio", "live", "embedding", "robotics", "computer", "native"))):
-                names.append(n)
-        print("Available flash models:", names)
-        return names
-    except Exception as e:
-        print("Could not list models:", e)
-        return []
-
-
-def ask_gemini(topic, fmt):
-    found = sorted(list_models(), reverse=True)
-    found.sort(key=lambda n: "lite" in n)  # full models first, lite last
-    models = []
-    for m in [MODEL, "gemini-flash-latest"] + found:
-        if m not in models:
-            models.append(m)
-    models = models[:6]
-    print("Will try models in this order:", models)
-    body = {
-        "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "contents": [{"parts": [{"text": f"Topic: {topic}\nFORMAT: {fmt}\nWrite a fresh, specific take. Avoid generic advice."}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
-    }
-    last = None
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(2):
-            try:
-                r = requests.post(url, headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=60)
-                if r.status_code != 200:
-                    print(f"GEMINI ERROR [{model}] HTTP {r.status_code}: {r.text[:400]}")
-                    last = f"HTTP {r.status_code}"
-                    if r.status_code in (400, 401, 403, 404):
-                        break  # try next model
-                    time.sleep(10 * (attempt + 1))  # busy server: wait a bit longer each time
-                    continue
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                data = json.loads(text)
-                n = len(data["script"].split())
-                if not 45 <= n <= 90:
-                    raise ValueError(f"script has {n} words, retrying")
-                print("Gemini OK with model:", model)
-                return data
-            except Exception as e:
-                last = e
-                print(f"Gemini problem [{model}]:", e)
-                time.sleep(3)
-    raise RuntimeError(f"Gemini failed on all models. Last error: {last}")
-
-
-def clean(text):
-    text = re.sub(r"[*_#`]", "", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-async def tts(text, mp3):
-    import edge_tts
-    try:
-        comm = edge_tts.Communicate(text, VOICE, rate="-5%", boundary="WordBoundary")
-    except TypeError:  # older edge-tts versions only emit word boundaries anyway
-        comm = edge_tts.Communicate(text, VOICE, rate="-5%")
-    words = []
-    with open(mp3, "wb") as f:
-        async for ch in comm.stream():
-            if ch["type"] == "audio":
-                f.write(ch["data"])
-            elif ch["type"] == "WordBoundary":
-                start = ch["offset"] / 1e7
-                words.append((ch["text"], start, start + ch["duration"] / 1e7))
-    return words
-
-
-def probe(path):
-    out = subprocess.check_output(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)]
-    )
-    return float(out.strip())
-
-
-def fake_words(text, dur):
-    ws = text.split()
-    step = dur / max(len(ws), 1)
-    return [(w, i * step, (i + 1) * step) for i, w in enumerate(ws)]
-
-
-def ts(t):
-    return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
-
-
-def make_ass(words, path, per=3, hook=None):
-    header = (
-        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n"
-        "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,"
-        "Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,"
-        "MarginL,MarginR,MarginV,Encoding\n"
-        "Style: Main,DejaVu Sans,76,&H00FFFFFF,&H000000FF,&H00302010,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,5,90,90,0,1\n"
-        "Style: Hook,DejaVu Sans,96,&H0000E5FF,&H000000FF,&H00201008,&H80000000,-1,0,0,0,100,100,0,0,1,9,3,8,70,70,330,1\n\n"
-        "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
-    )
-    lines = []
-    if hook:
-        hw = re.sub(r"[{}\\]", "", hook).upper().split()
-        if len(hw) > 3:
-            mid = (len(hw) + 1) // 2
-            htxt = " ".join(hw[:mid]) + "\\N" + " ".join(hw[mid:])
-        else:
-            htxt = " ".join(hw)
-        lines.append(f"Dialogue: 1,{ts(0.05)},{ts(2.6)},Hook,,0,0,0,,{htxt}")
-    chunks = [words[i:i + per] for i in range(0, len(words), per)]
-    for i, ch in enumerate(chunks):
-        start = ch[0][1]
-        end = chunks[i + 1][0][1] if i + 1 < len(chunks) else ch[-1][2] + 0.3
-        text = " ".join(w[0] for w in ch).replace("{", "").replace("}", "")
-        lines.append(f"Dialogue: 0,{ts(start)},{ts(end)},Main,,0,0,0,,{text}")
-    pathlib.Path(path).write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
-
-
-def fetch_pexels(keywords, want=5):
-    paths, seen = [], set()
-    if not PEXELS_KEY:
-        print("No PEXELS_API_KEY, using plain background.")
-        return paths
-    for kw in keywords:
-        if len(paths) >= want:
-            break
-        try:
-            r = requests.get(
-                "https://api.pexels.com/videos/search",
-                headers={"Authorization": PEXELS_KEY},
-                params={"query": kw, "orientation": "portrait", "size": "medium", "per_page": 8},
-                timeout=30,
-            )
-            vids = r.json().get("videos", [])
-            random.shuffle(vids)
-            for v in vids:
-                if v["id"] in seen:
-                    continue
-                files = [f for f in v["video_files"]
-                         if f.get("file_type") == "video/mp4" and f.get("height", 0) >= 1080
-                         and f["height"] >= f.get("width", 0)]
-                if not files:
-                    continue
-                best = min(files, key=lambda x: x["height"])
-                p = WORK / f"raw{len(paths)}.mp4"
-                p.write_bytes(requests.get(best["link"], timeout=180).content)
-                seen.add(v["id"])
-                paths.append(p)
-                break
-        except Exception as e:
-            print("Pexels failed for", kw, e)
-    return paths
-
-
-def fetch_pixabay(keywords, want=5):
-    paths, seen = [], set()
-    for kw in keywords:
-        if len(paths) >= want:
-            break
-        try:
-            r = requests.get(
-                "https://pixabay.com/api/videos/",
-                params={"key": PIXABAY_KEY, "q": kw, "per_page": 10, "safesearch": "true"},
-                timeout=30,
-            )
-            hits = r.json().get("hits", [])
-            random.shuffle(hits)
-            for h in hits:
-                if h["id"] in seen:
-                    continue
-                vids = h.get("videos", {})
-                pick = next((vids[k] for k in ("large", "medium") if vids.get(k, {}).get("url")), None)
-                if not pick:
-                    continue
-                p = WORK / f"raw{len(paths)}.mp4"
-                p.write_bytes(requests.get(pick["url"], timeout=180).content)
-                seen.add(h["id"])
-                paths.append(p)
-                break
-        except Exception as e:
-            print("Pixabay failed for", kw, e)
-    return paths
-
-
-def fetch_clips(keywords, want=5):
-    if PIXABAY_KEY:
-        clips = fetch_pixabay(keywords, want)
-        if clips:
-            return clips
-    if PEXELS_KEY:
-        return fetch_pexels(keywords, want)
-    print("No stock-video key set, using plain background.")
-    return []
-
-
-def run(cmd):
-    subprocess.run(cmd, check=True, cwd=WORK)
-
-
-def build(clips, total):
-    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p"
-    enc = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
-    if clips:
-        seg = total / len(clips)
-        names = []
-        for i, c in enumerate(clips):
-            run(["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", c.name,
-                 "-t", f"{seg:.3f}", "-vf", vf] + enc + [f"seg{i}.mp4"])
-            names.append(f"seg{i}.mp4")
-        (WORK / "list.txt").write_text("".join(f"file '{n}'\n" for n in names))
-        run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "list.txt",
-             "-c", "copy", "bg.mp4"])
-    else:
-        run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
-             f"color=c=0x1f2a44:s=1080x1920:r=30:d={total:.2f}", "-pix_fmt", "yuv420p"] + enc + ["bg.mp4"])
-
-    music = sorted((ROOT / "music").glob("*.mp3"))
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", "bg.mp4", "-i", "voice.mp3"]
-    if music:
-        cmd += ["-stream_loop", "-1", "-i", str(random.choice(music).resolve())]
-        af = "[1:a]anull[a1];[2:a]volume=0.08[a2];[a1][a2]amix=inputs=2:duration=first:normalize=0[mix];[mix]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
-    else:
-        af = "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
-    cmd += ["-filter_complex", "[0:v]ass=captions.ass[v];" + af, "-map", "[v]", "-map", "[a]",
-            "-t", f"{total:.2f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-            str((OUT / "short.mp4").resolve())]
-    run(cmd)
-
-
-def main():
-    topic = os.environ.get("TOPIC") or pick_topic()
-    print("Topic:", topic)
-    fmt = pick_format()
-    print("Format:", fmt.split(':')[0])
-    data = ask_gemini(topic, fmt)
-    script = clean(data["script"])
-    words = asyncio.run(tts(script, WORK / "voice.mp3"))
-    dur = probe(WORK / "voice.mp3")
-    if not words:
-        words = fake_words(script, dur)
-    make_ass(words, WORK / "captions.ass", hook=data.get("hook"))
-    clips = fetch_clips(list(data.get("visual_keywords", [])) + GENERIC, want=9)
-    total = min(dur + 0.6, 59.0)
-    build(clips, total)
-
-    tags = [str(t)[:30] for t in data.get("tags", [])][:10]
-    hashtags = "#Shorts #ADHD #Neurodivergent #GentleProductivity"
-    title = make_title(data["title"], episode_number())
-    meta = {
-        "title": title,
-        "description": f"{clean(data.get('description', ''))}\n\nNew gentle tools every day. Follow NeuroFlow.\n\n{hashtags}\n\n{DISCLAIMER}",
-        "tags": tags + ["Shorts", "ADHD", "neurodivergent", "executive dysfunction"],
-        "topic": topic,
-        "pinned_comment": clean(data.get("pinned_comment", "")),
-        "script": script,
-    }
-    (OUT / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    print("Done:", title, f"({total:.1f}s)")
-
-
-if __name__ == "__main__":
-    main()
+req = youtube.videos().insert(
+    part="snippet,status",
+    body=body,
+    media_body=MediaFileUpload(str(OUT / "short.mp4"), chunksize=-1, resumable=True),
+)
+resp = None
+while resp is None:
+    _, resp = req.next_chunk()
+print("Uploaded:", "https://youtube.com/shorts/" + resp["id"], "| privacy:", body["status"]["privacyStatus"])
