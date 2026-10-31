@@ -100,7 +100,7 @@ def list_models():
         for m in r.json().get("models", []):
             n = m.get("name", "").replace("models/", "")
             if ("generateContent" in m.get("supportedGenerationMethods", []) and "flash" in n
-                    and not any(x in n for x in ("image", "tts", "audio", "live", "embedding", "robotics", "computer", "native"))):
+                    and not any(x in n for x in ("image", "tts", "audio", "live", "embedding", "robotics", "computer", "native", "omni", "preview"))):
                 names.append(n)
         print("Available flash models:", names)
         return names
@@ -113,7 +113,7 @@ def ask_gemini(topic, fmt):
     found = sorted(list_models(), reverse=True)
     found.sort(key=lambda n: "lite" in n)  # full models first, lite last
     models = []
-    for m in [MODEL, "gemini-flash-latest"] + found:
+    for m in ["gemini-flash-latest", MODEL] + found:
         if m not in models:
             models.append(m)
     models = models[:6]
@@ -132,7 +132,7 @@ def ask_gemini(topic, fmt):
                 if r.status_code != 200:
                     print(f"GEMINI ERROR [{model}] HTTP {r.status_code}: {r.text[:400]}")
                     last = f"HTTP {r.status_code}"
-                    if r.status_code in (400, 401, 403, 404):
+                    if r.status_code in (400, 401, 403, 404, 429):
                         break  # try next model
                     time.sleep(10 * (attempt + 1))  # busy server: wait a bit longer each time
                     continue
